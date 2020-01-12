@@ -223,6 +223,10 @@ struct mac_addr {
     return true;
   }
 
+  bool is_empty() const {
+    return !_addr[0] && !_addr[1] && !_addr[2] && !_addr[3] && !_addr[4] && !_addr[5]; 
+  }
+
   void print() {
     Serial.print(_addr[0], HEX);
     Serial.print(":");
@@ -348,6 +352,23 @@ struct arp_pkg {
     _plen = PLEN;
   }
 
+  void init_req(const ip_addr &to_ip_addr, const mac_addr &from_mac_addr, const ip_addr &from_ip_addr) {
+    init();
+    _opcode = arp_pkg::OPCODE_REQ;
+    _sha = from_mac_addr;
+    _spa = from_ip_addr;
+    _tpa = to_ip_addr;
+  }
+
+  void init_resp(const mac_addr &to_mac_addr, const ip_addr &to_ip_addr, const mac_addr &from_mac_addr, const ip_addr &from_ip_addr) {
+    init();
+    _opcode = arp_pkg::OPCODE_RESP;
+    _sha = from_mac_addr;
+    _spa = from_ip_addr;
+    _tha = to_mac_addr;
+    _tpa = to_ip_addr;
+  }
+
   bool is_valid() {
     if (_htype != HTYPE_ETHERNET) {
       Serial.print("Invalid htype value: ");
@@ -399,42 +420,6 @@ struct arp_pkg {
   }
 };
 
-struct arp_pkg_buff {
-  ethernet_header _header;
-  arp_pkg _pkg;
-
-  void init() {
-    _header._type = ethernet_header::TYPE_ARP;
-    _pkg.init();
-  }
-
-  void init_req(const ip_addr &to_ip_addr, const mac_addr &from_mac_addr, const ip_addr &from_ip_addr) {
-    init();
-    _header._to_addr = mac_addr(0xff, 0xff, 0xff, 0xff, 0xff, 0xff);
-    _header._from_addr = from_mac_addr;
-    _pkg._opcode = arp_pkg::OPCODE_REQ;
-    _pkg._sha = from_mac_addr;
-    _pkg._spa = from_ip_addr;
-    _pkg._tpa = to_ip_addr;
-  }
-
-  void init_resp(const mac_addr &to_mac_addr, const ip_addr &to_ip_addr, const mac_addr &from_mac_addr, const ip_addr &from_ip_addr) {
-    init();
-    _header._to_addr = to_mac_addr;
-    _header._from_addr = from_mac_addr;
-    _pkg._opcode = arp_pkg::OPCODE_RESP;
-    _pkg._sha = from_mac_addr;
-    _pkg._spa = from_ip_addr;
-    _pkg._tha = to_mac_addr;
-    _pkg._tpa = to_ip_addr;
-  }
-
-  void print() {
-    _header.print();
-    _pkg.print();
-  }
-};
-
 struct ip_pkg {
   static const uint8_t TYPE_ICMP = 0x01;  
   
@@ -467,6 +452,13 @@ struct ip_pkg {
     return ~htons((uint16_t)sum);
   }
 
+  void init() {
+    set_ver(4);
+    set_ihl(5);
+    set_offset(0);
+    _ttl = 0x80;
+  }
+
   uint8_t get_ver() const { return (_ver & VER_MASK) >> 4; }
 
   uint8_t get_ihl() const { return (_ver & IHL_MASK); }
@@ -474,6 +466,16 @@ struct ip_pkg {
   uint16_t get_len() const { return htons(_len); }
 
   uint16_t get_id() const { return htons(_id); }
+
+  void set_ver(uint8_t value) { _ver &= IHL_MASK; _ver |= (value << 4); }
+
+  void set_ihl(uint8_t value) { _ver &= VER_MASK; _ver |= (value & IHL_MASK); }
+
+  void set_len(uint16_t value) { _len = htons(value); }
+
+  void set_id(uint16_t value) { _id = htons(value); }
+
+  void set_offset(uint16_t value) { _offset = htons(value); }
 
   uint16_t get_calc_check_sum() {
     uint16_t old_check_sum = _check_sum;
@@ -487,7 +489,7 @@ struct ip_pkg {
     return get_calc_check_sum() == _check_sum;
   }
 
-  void print() {
+  void print() const {
     Serial.print("ver: ");
     Serial.println(get_ver());
     Serial.print("ihl: ");
@@ -507,29 +509,34 @@ struct ip_pkg {
     Serial.print("from ip: ");
     _from_addr.print();
     Serial.print(" to ip: ");
-    _to_addr.print();
-    Serial.print("cchecksum: 0x");
-    Serial.println(get_calc_check_sum(), HEX);
+    _to_addr.println();
   }
 };
 
 struct icmp_pkg {
+  static const uint8_t TYPE_ECHO_REQ = 0x08;
+  static const uint8_t TYPE_ECHO_RESP = 0x00;
+
+  static const uint8_t CODE_ECHO = 0x00;
+  
   uint8_t _type;
   uint8_t _code;
   uint16_t _check_sum;
   uint16_t _id;
   uint16_t _seq;
 
-  uint16_t get_calc_check_sum() {
-    uint16_t old_check_sum = _check_sum;
-    _check_sum = 0;
-    uint16_t new_check_sum = ip_pkg::check_sum(0, (uint8_t*)this, sizeof(icmp_pkg));
-    _check_sum = old_check_sum;
+  static uint16_t get_calc_check_sum(uint8_t *buff, uint16_t len) {
+    icmp_pkg *icmp_data = (icmp_pkg*)buff;
+    uint16_t old_check_sum = icmp_data->_check_sum;
+    icmp_data->_check_sum = 0;
+    uint16_t new_check_sum = ip_pkg::check_sum(0, buff, len);
+    icmp_data->_check_sum = old_check_sum;
     return new_check_sum;
   }
 
-  bool is_check_sum_valid() {
-    return get_calc_check_sum() == _check_sum;
+  static bool is_check_sum_valid(uint8_t *buff, uint16_t len) {
+    icmp_pkg *icmp_data = (icmp_pkg*)buff;
+    return icmp_data->_check_sum == get_calc_check_sum(buff, len);
   }
 
   void print() {
@@ -543,16 +550,14 @@ struct icmp_pkg {
     Serial.println(_id, HEX);
     Serial.print("seq: 0x");
     Serial.println(_seq, HEX);
-    Serial.print("cchecksum: 0x");
-    Serial.println(get_calc_check_sum(), HEX);
   }
 };
 
-class in_pkg_handler {
+class pkg_handler {
 public:
   uint16_t _type;
 
-  in_pkg_handler(uint16_t type):
+  pkg_handler(uint16_t type):
     _type(type)
   {}
 
@@ -632,18 +637,22 @@ class net {
   static const uint16_t PHLCON_MAX_TIME = 0x000A;
 
   static const uint16_t SEND_BUFF_START = RXSIZE;
+
+  static const uint8_t HANDLERS_CAPACITY = 5;
     
   uint16_t _next_pkg_ptr;
+  uint16_t _send_pkg_pos;
 
-  in_pkg_handler *_handlers[5];
+  pkg_handler *_handlers[HANDLERS_CAPACITY];
   uint8_t _handlers_size;
-  
+
 public:
   encspi _spi;
   ip_addr _ip;
 
   net():
     _next_pkg_ptr(0),
+    _send_pkg_pos(0),
     _handlers_size(0)
   {}
 
@@ -673,10 +682,6 @@ public:
     _spi.miwrite(PHCON2, PHCON2_HDLDIS);
     _spi.miwrite(PHLCON, PHLCON_LAONPUT | PHLCON_LBONPUT | PHLCON_MAX_TIME);
     _spi.set_bits(ECON1, ECON1_RXEN);
-
-    Serial.print("ERXFCON: ");
-    Serial.println(_spi.read(ERXFCON));
-    Serial.println();
   }
 
   void set_mac_addr(const mac_addr &addr) {
@@ -699,17 +704,19 @@ public:
     return ret;
   }
 
-  void add_read_pkg_handler(in_pkg_handler *handler) {
+  bool add_read_pkg_handler(pkg_handler *handler) {
+    if (_handlers_size >= HANDLERS_CAPACITY) {
+      return false;
+    }
     _handlers[_handlers_size] = handler;
     _handlers_size++;
+    return true;
   }
 
   void read_pkg() {
     if (_spi.read(EPKTCNT) <= 0) {
       return;
     }
-//    Serial.print(_spi.read(EPKTCNT));
-//    Serial.println("+++++++++++++++++++++++ receive pkg +++++++++++++++++++++++");
     enc28j60_header enc28j60_h;
     _spi.read_buff(_next_pkg_ptr, (uint8_t*)&enc28j60_h, sizeof(enc28j60_header));
     if (!enc28j60_h.is_valid()) {
@@ -740,28 +747,26 @@ public:
       Serial.print("Unknowen pkg type: ");
       Serial.print(ethernet_h._type, HEX);
       Serial.println();
-//      Serial.println();
     }
   }
 
   void read_sended() {
     uint8_t f_bute = 0;
     _spi.read_buff_test(SEND_BUFF_START, &f_bute, 1);
-    arp_pkg_buff arp_resp;
-    _spi.read_buff_test(SEND_BUFF_START + 1, (uint8_t*)&arp_resp, sizeof(arp_pkg_buff));
+//    arp_pkg_buff arp_resp;
+//    _spi.read_buff_test(SEND_BUFF_START + 1, (uint8_t*)&arp_resp, sizeof(arp_pkg_buff));
 
     Serial.print("First byte: ");
     Serial.println(f_bute);
     Serial.println("Sended pkg: ");
-    arp_resp.print();
+//    arp_resp.print();
 
     Serial.print("Readed: ");
-    Serial.println(sizeof(arp_pkg_buff) + 1);
+//    Serial.println(sizeof(arp_pkg_buff) + 1);
   }
 
   void write_pkg(uint8_t *buff, uint16_t len) {
     while(_spi.read(ECON1) & ECON1_TXRTS) {};
-    _spi.write16(ETXSTART, SEND_BUFF_START);
     uint8_t r_bute = 0;
     _spi.write_buff(SEND_BUFF_START, &r_bute, 1);
     _spi.write_buff(SEND_BUFF_START + 1, buff, len);
@@ -769,9 +774,32 @@ public:
     _spi.write16(ETXEND, SEND_BUFF_START + len + 1);
     _spi.set_bits(ECON1, ECON1_TXRTS);
     while(_spi.read(EIR) & (EIR_TXERIF | EIR_RXERIF)) {}
-//    Serial.print("Sended: ");
-//    Serial.println(len + 1);
-//    read_sended();
+  }
+
+  void begin_send_pkg(const mac_addr &from, const mac_addr &to, uint16_t type) {
+    while(_spi.read(ECON1) & ECON1_TXRTS) {};
+    uint8_t r_bute = 0;
+    _spi.write_buff(SEND_BUFF_START, &r_bute, 1);
+    ethernet_header pkg;
+    pkg._to_addr = to;
+    pkg._from_addr = from;
+    pkg._type = type;
+    _spi.write_buff(SEND_BUFF_START + 1, (uint8_t*)&pkg, sizeof(ethernet_header));
+    _send_pkg_pos = SEND_BUFF_START + 1 + sizeof(ethernet_header);
+  }
+
+  void send_pkg(uint8_t *buff, uint16_t len) {
+    _spi.write_buff(_send_pkg_pos, buff, len);
+    _send_pkg_pos += len;
+  }
+
+  void end_send_pkg(uint8_t *buff, uint16_t len) {
+    _spi.write_buff(_send_pkg_pos, buff, len);
+    _spi.write16(ETXSTART, SEND_BUFF_START);
+    _spi.write16(ETXEND, _send_pkg_pos + len);
+    _spi.set_bits(ECON1, ECON1_TXRTS);
+    while(_spi.read(EIR) & (EIR_TXERIF | EIR_RXERIF)) {}
+    _send_pkg_pos = 0;
   }
 
   void print_buff(uint8_t *buff, uint16_t len) {
@@ -785,21 +813,31 @@ public:
   }
 };
 
-class arp : public in_pkg_handler {
+struct arp_cache_item {
+  ip_addr _ip;
+  mac_addr _mac;
+};
+
+class arp_handler {
+public:
+  virtual void ip_resolved(const ip_addr &addr) = 0;
+};
+
+class arp : public pkg_handler {
+  static const uint8_t HANDLER_CAPACITY = 1;
+  static const uint8_t CACHE_CAPACITY = 20;
+  
   net *_net;
-
-  struct cache_item {
-    ip_addr _ip;
-    mac_addr _mac;
-  };
-
-  cache_item _cache[5];
-  uint8_t _cache_size;  
+  arp_handler *_handler[HANDLER_CAPACITY];
+  uint8_t _handler_capacity;
+  arp_cache_item _cache[CACHE_CAPACITY];
+  uint8_t _cache_size;
   
 public:
   arp():
-    in_pkg_handler(ethernet_header::TYPE_ARP),
+    pkg_handler(ethernet_header::TYPE_ARP),
     _net(0),
+    _handler_capacity(0),
     _cache_size(0)
   {}
 
@@ -813,16 +851,49 @@ public:
     }
   }
 
-  void add_cache(const ip_addr &ip, const mac_addr &mac) {
+  bool add_handler(arp_handler *handler) {
+    if (_handler_capacity >= HANDLER_CAPACITY) {
+      return false;
+    }
+    _handler[_handler_capacity] = handler;
+    ++_handler_capacity;
+    return true;
+  }
+
+  bool add_cache(const ip_addr &ip, const mac_addr &mac) {
+    if (_cache_size >= CACHE_CAPACITY) {
+      return false; 
+    }
     for (uint8_t i = 0; i < _cache_size; i++) {
       if (_cache[i]._ip == ip) {
         _cache[i]._mac = mac;
-        return;
+        return true;
       }
     }
     _cache[_cache_size]._ip = ip;
     _cache[_cache_size]._mac = mac;
     _cache_size++;
+    return true;
+  }
+
+  bool del_cache(const ip_addr &ip) {
+    if (_cache_size <= 0) {
+      return false;
+    }
+    uint8_t move = 0;
+    for (uint8_t i = 0; i < _cache_size; i++) {
+      if (_cache[i]._ip == ip) {
+        ++move;
+      }
+      else
+      {
+        if (move > 0) {
+          _cache[i - move] = _cache[i];
+        }
+      }
+    }
+    _cache_size -= move;
+    return move;
   }
 
   mac_addr get_mac(const ip_addr &ip) {
@@ -831,6 +902,10 @@ public:
         return _cache[i]._mac;
       }
     }
+    _net->begin_send_pkg(_net->get_mac_addr(), mac_addr(0xff, 0xff, 0xff, 0xff, 0xff, 0xff), ethernet_header::TYPE_ARP);
+    arp_pkg arp_req;
+    arp_req.init_req(ip, _net->get_mac_addr(), _net->_ip);
+    _net->end_send_pkg((uint8_t*)&arp_req, sizeof(arp_pkg));
     return mac_addr();
   }
 
@@ -839,18 +914,6 @@ public:
     _net->add_read_pkg_handler(this);
   }
   
-  void send_req(const ip_addr &to_ip, const mac_addr &from_mac, const ip_addr &from_ip) {
-    arp_pkg_buff arp_req;
-    arp_req.init_req(to_ip, from_mac, from_ip);    
-    _net->write_pkg((uint8_t*)&arp_req, sizeof(arp_pkg_buff));
-  }
-
-  void send_resp(const mac_addr &to_mac, const ip_addr &to_ip, const mac_addr &from_mac, const ip_addr &from_ip) {
-    arp_pkg_buff arp_resp;
-    arp_resp.init_resp(to_mac, to_ip, from_mac, from_ip);
-    _net->write_pkg((uint8_t*)&arp_resp, sizeof(arp_pkg_buff));
-  }
-
   virtual void read_pkg(uint16_t pos) {
     arp_pkg arp_req;
     _net->_spi.read_buff(pos, (uint8_t*)&arp_req, sizeof(arp_pkg));
@@ -861,53 +924,196 @@ public:
     }
     if (arp_req._opcode == arp_pkg::OPCODE_REQ) {
       if (arp_req._tpa != _net->_ip) {
-//        Serial.print("arp target ip: ");
-//        arp_req._tpa.println();
         return;
       }
-      send_resp(arp_req._sha, arp_req._spa, _net->get_mac_addr(), _net->_ip);
-      Serial.println("answer to arp request.");
+      _net->begin_send_pkg(_net->get_mac_addr(), arp_req._sha, ethernet_header::TYPE_ARP);
+      arp_pkg arp_resp;
+      arp_resp.init_resp(arp_req._sha, arp_req._spa, _net->get_mac_addr(), _net->_ip);
+      _net->end_send_pkg((uint8_t*)&arp_resp, sizeof(arp_pkg));
       Serial.println();
-//      send_request(ip_addr(100, 100, 100, 1));
       return;
     }
     if (arp_req._opcode == arp_pkg::OPCODE_RESP) {
       add_cache(arp_req._spa, arp_req._sha);
-      Serial.println("arp response readed.");
-      print_cache();
-      Serial.println();
+      for (int i = 0; i < _handler_capacity; ++i) {
+        _handler[i]->ip_resolved(arp_req._spa);
+      }
       return;
     }
     Serial.println("unknowen arp opcode");
     Serial.println();
   }
+};
 
-  void send_request(const ip_addr &ip) {
-    send_req(ip, _net->get_mac_addr(), _net->_ip);
+#define POS_TYPE uint32_t 
+struct send_ip_pkg_item {
+  static const uint8_t P_NEXT_BEGIN = 0x01;
+  static const uint8_t P_USED = 0x02;
+
+  uint16_t _buff_len;
+  ip_addr _ip;
+  uint8_t _type;
+  uint16_t _id;
+  uint8_t _prop;
+
+  void init(uint16_t buff_len, const ip_addr& addr, uint8_t type, uint16_t id, uint8_t prop) {
+      _buff_len = buff_len;
+      _ip = addr;
+      _type = type;
+      _id = id;
+      _prop = prop;
+  }
+
+  uint16_t get_size() const {
+    return sizeof(send_ip_pkg_item) + _buff_len;
+  }
+
+  POS_TYPE get_next_pos(POS_TYPE pos, uint16_t buff_size) const {
+    if (_prop & P_NEXT_BEGIN) {
+      return 0;
+    }
+    POS_TYPE next_pos = pos + get_size();
+    if (next_pos > buff_size) {
+      return 0;
+    }
+    return next_pos;
+  }
+
+  void write_buff(uint8_t *buff, uint16_t len) {
+    uint8_t *this_buff = (uint8_t*)(this + 1); 
+    for (uint16_t i = 0; i < len; ++i) {
+      this_buff[i] = buff[i];
+    }
   }
 };
 
-class ip : public in_pkg_handler {
-  in_pkg_handler *_handlers[5];
+class ip_handler {
+public:
+  uint16_t _type;
+
+  ip_handler(uint16_t type):
+    _type(type)
+  {}
+
+  virtual void read_pkg(uint16_t pos, const ip_pkg &ip_header) = 0;
+};
+
+class ip : public pkg_handler, arp_handler {
+  static const uint16_t BUFF_SIZE = 300;
+  static const uint8_t HANDLERS_CAPACITY = 5;
+  
+  ip_handler *_handlers[HANDLERS_CAPACITY];
   uint8_t _handlers_size;
+
+  uint8_t _buff[BUFF_SIZE];
+  bool _empty_buff;
+  POS_TYPE _first_item_pos;
+  POS_TYPE _last_item_pos;
+
+  send_ip_pkg_item* get_item(uint16_t pos) {
+    return (send_ip_pkg_item*)(_buff + pos);
+  }
+  
+  bool save_ip_pkg_data(const ip_addr& addr, uint8_t type, uint16_t ip_id, uint8_t* buff, uint16_t len) {
+    uint16_t new_item_len = sizeof(send_ip_pkg_item) + len;
+    if (new_item_len > BUFF_SIZE) {
+      return false;
+    }
+    send_ip_pkg_item* last_item = get_item(_last_item_pos);
+    if (!_empty_buff) {
+      _last_item_pos = last_item->get_next_pos(_last_item_pos, BUFF_SIZE);
+      uint16_t last_item_end_pos = _last_item_pos + new_item_len;
+      if ((last_item_end_pos) > BUFF_SIZE) {
+        last_item->_prop |= send_ip_pkg_item::P_NEXT_BEGIN;
+        _last_item_pos = 0;
+        _first_item_pos = get_item(0)->get_next_pos(0, BUFF_SIZE);
+        last_item_end_pos = new_item_len;
+      }
+      if (_first_item_pos > _last_item_pos) {
+        while (_first_item_pos && _first_item_pos < last_item_end_pos) {
+          _first_item_pos = get_item(_first_item_pos)->get_next_pos(_first_item_pos, BUFF_SIZE);
+        }
+      }
+      last_item = get_item(_last_item_pos);
+    }
+    last_item->init(len, addr, type, ip_id, 0);
+    last_item->write_buff(buff, len);
+    _empty_buff = false;
+    return true;
+  }
+
+  void send_saved_pkg(const ip_addr &addr) {
+    if (_empty_buff) {
+      return;
+    }
+    uint16_t next_pos = _first_item_pos;
+    for (;;) {
+      send_ip_pkg_item *item = get_item(next_pos);
+      if (!(item->_prop & send_ip_pkg_item::P_USED) || (item->_ip != addr)) {
+        mac_addr to_mac_addr = _arp->get_mac(addr);
+        if (to_mac_addr.is_empty()) {
+          Serial.println("can't resolv ip addres");
+        }
+        else
+        {
+          uint8_t *buff = (uint8_t*)(item + 1);
+          send_pkg(item->_ip, to_mac_addr, item->_type, item->_id, buff, item->_buff_len);
+        }      
+        item->_prop |= send_ip_pkg_item::P_USED;
+      }
+      if (_last_item_pos == next_pos) {
+        break;
+      }
+      next_pos = item->get_next_pos(next_pos, BUFF_SIZE);
+    }
+  }
+
+  void send_pkg(const ip_addr &addr, const mac_addr &to_mac_addr, uint8_t type, uint16_t ip_id, uint8_t *buff, uint16_t len) {
+    _net->begin_send_pkg(_net->get_mac_addr(), to_mac_addr, ethernet_header::TYPE_IP);
+    ip_pkg ip_header;
+    ip_header.init();
+    ip_header.set_id(ip_id);
+    ip_header.set_len(sizeof(ip_pkg) + len);
+    ip_header._type = type;
+    ip_header._from_addr = _net->_ip;
+    ip_header._to_addr = addr;
+    ip_header._check_sum = ip_header.get_calc_check_sum();
+    _net->send_pkg((uint8_t*)&ip_header, sizeof(ip_pkg));
+    _net->end_send_pkg(buff, len);
+  }
   
 public:
   net *_net;
+  arp *_arp;
 
   ip():
-    in_pkg_handler(ethernet_header::TYPE_IP),
+    pkg_handler(ethernet_header::TYPE_IP),
     _handlers_size(0),
-    _net(0)
+    _empty_buff(true),
+    _first_item_pos(0),
+    _last_item_pos(0),
+    _net(0),
+    _arp(0)
   {}
 
-  void init(net *n) {
+  void init(net *n, arp *a) {
     _net = n;
     _net->add_read_pkg_handler(this);
+    _arp = a;
+    _arp->add_handler(this);
   }
 
-  void add_read_pkg_handler(in_pkg_handler *handler) {
+  bool add_read_pkg_handler(ip_handler *handler) {
+    if (_handlers_size >= HANDLERS_CAPACITY) {
+      return false;
+    }
     _handlers[_handlers_size] = handler;
     _handlers_size++;
+    return true;
+  }
+
+  virtual void ip_resolved(const ip_addr &addr) {
+    send_saved_pkg(addr);
   }
 
   virtual void read_pkg(uint16_t pos) {
@@ -922,7 +1128,7 @@ public:
     bool handled = false;
     for(int8_t i = 0; i < _handlers_size; ++i) {
       if (_handlers[i]->_type == ip_header._type) {
-        _handlers[i]->read_pkg(pos);
+        _handlers[i]->read_pkg(pos, ip_header);
         handled = true;
         break;
       }
@@ -933,14 +1139,30 @@ public:
       Serial.println();   
     }
   }
+
+  bool send_ip_pkg(const ip_addr &to_ip_addr, uint8_t type, uint16_t ip_id, uint8_t *buff, uint16_t len) {
+    mac_addr to_mac_addr = _arp->get_mac(to_ip_addr);
+    if (to_mac_addr.is_empty()) {
+      if (!save_ip_pkg_data(to_ip_addr, type, ip_id, buff, len)) {
+        Serial.print("can't save ip pkg data.");
+        Serial.println();
+        return false;       
+      }
+      return true;
+    }
+    send_pkg(to_ip_addr, to_mac_addr, type, ip_id, buff, len);
+    return true;
+  }
 };
 
-class icmp : public in_pkg_handler {
+class icmp : public ip_handler {
+  const static uint16_t EXHO_REQ_BUFF_SIZE = 60 - sizeof(ip_pkg);
+  
   ip *_ip;
 
 public:
   icmp():
-    in_pkg_handler(ip_pkg::TYPE_ICMP),
+    ip_handler(ip_pkg::TYPE_ICMP),
     _ip(0)
   {}
 
@@ -949,11 +1171,26 @@ public:
     _ip->add_read_pkg_handler(this);
   }
 
-  virtual void read_pkg(uint16_t pos) {
-    icmp_pkg icmp_data;
-    _ip->_net->_spi.read_buff(pos, (uint8_t*)&icmp_data, sizeof(icmp_pkg));
-    icmp_data.print();
-    Serial.println();
+  virtual void read_pkg(uint16_t pos, const ip_pkg &ip_header) {
+    if (ip_header.get_len() != (EXHO_REQ_BUFF_SIZE + sizeof(ip_pkg))) {
+      Serial.println("wrong icmp len.");
+      Serial.println();
+      return;
+    }
+    uint8_t buff[EXHO_REQ_BUFF_SIZE];
+    _ip->_net->_spi.read_buff(pos, buff, EXHO_REQ_BUFF_SIZE);
+    icmp_pkg *icmp_data = (icmp_pkg*)buff;
+    if (!icmp_pkg::is_check_sum_valid(buff, EXHO_REQ_BUFF_SIZE)) {
+      Serial.println("wrong icmp echo request check sum.");
+      Serial.println();
+      return;
+    }
+    if ((icmp_data->_type != icmp_pkg::TYPE_ECHO_REQ) || (icmp_data->_code != icmp_pkg::CODE_ECHO)) {
+      return;
+    }   
+    icmp_data->_type = icmp_pkg::TYPE_ECHO_RESP;
+    icmp_data->_check_sum = icmp_pkg::get_calc_check_sum(buff, EXHO_REQ_BUFF_SIZE);
+    _ip->send_ip_pkg(ip_header._from_addr, ip_pkg::TYPE_ICMP, ip_header.get_id() + 1, buff, EXHO_REQ_BUFF_SIZE);
   }
 };
 
@@ -967,14 +1204,11 @@ void setup() {
   _net.init(mac_addr(0x74,0x69,0x69,0x2D,0x30,0x34));
   _net._ip = ip_addr(100, 100, 100, 12);
   _arp.init(&_net);
-  _ip.init(&_net);
+  _ip.init(&_net, &_arp);
   _icmp.init(&_ip);
   delay(10);
-  _arp.send_request(ip_addr(100, 100, 100, 1));
 }
 
 void loop() {
   _net.read_pkg();
-  
-  // put your main code here, to run repeatedly:
 }
