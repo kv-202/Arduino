@@ -682,6 +682,9 @@ public:
     _spi.miwrite(PHCON2, PHCON2_HDLDIS);
     _spi.miwrite(PHLCON, PHLCON_LAONPUT | PHLCON_LBONPUT | PHLCON_MAX_TIME);
     _spi.set_bits(ECON1, ECON1_RXEN);
+
+    Serial.print("ip: ");
+    _ip.println();
   }
 
   void set_mac_addr(const mac_addr &addr) {
@@ -1201,8 +1204,8 @@ icmp _icmp;
 
 void setup() {
   Serial.begin(9600);
-  _net.init(mac_addr(0x74,0x69,0x69,0x2D,0x30,0x34));
   _net._ip = ip_addr(100, 100, 100, 12);
+  _net.init(mac_addr(0x74,0x69,0x69,0x2D,0x30,0x34));
   _arp.init(&_net);
   _ip.init(&_net, &_arp);
   _icmp.init(&_ip);
